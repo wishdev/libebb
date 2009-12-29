@@ -70,14 +70,16 @@ struct ebb_connection {
   socklen_t socklen;           /* ro */ 
   ebb_server *server;          /* ro */
   char *ip;                    /* ro */
+  struct ev_loop *loop;                         /* ro */
   unsigned open:1;             /* ro */
+  unsigned secure:1;                            /* ro */
 
   const char *to_write;              /* ro */
   size_t to_write_len;               /* ro */
   size_t written;                    /* ro */ 
   ebb_after_write_cb after_write_cb; /* ro */
 
-  ebb_request_parser parser;   /* private */
+  ebb_request_parser *parser;   /* private */
   ev_io write_watcher;         /* private */
   ev_io read_watcher;          /* private */
   ev_timer timeout_watcher;    /* private */
@@ -110,6 +112,12 @@ struct ebb_connection {
   /* The connection was closed */
   void (*on_close) (ebb_connection*); 
 
+  /* When specified, don't use internal HTTP parser, go through this instead.
+   * Returning EBB_STOP means we don't want any more data, EBB_AGAIN will call
+   * us some more. To reenable receiving data events call ebb_connection_read(c)
+   */
+  int (*on_data) (ebb_connection*m,char*,int); 
+
   void *data;
 };
 
@@ -118,7 +126,7 @@ void ebb_server_init (ebb_server *server, struct ev_loop *loop);
 int ebb_server_set_secure (ebb_server *server, const char *cert_file, 
                            const char *key_file);
 #endif
-int ebb_server_listen_on_port (ebb_server *server, const int port);
+int ebb_tcp_server(ebb_server *server, char *ip, const int port);
 int ebb_server_listen_on_fd (ebb_server *server, const int sfd);
 void ebb_server_unlisten (ebb_server *server);
 

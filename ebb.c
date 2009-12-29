@@ -63,12 +63,12 @@ static void
 close_connection(ebb_connection *connection)
 {
 #ifdef HAVE_GNUTLS
-  if(connection->server->secure)
-    ev_io_stop(connection->server->loop, &connection->handshake_watcher);
+  if(connection->secure)
+    ev_io_stop(connection->loop, &connection->handshake_watcher);
 #endif
-  ev_io_stop(connection->server->loop, &connection->read_watcher);
-  ev_io_stop(connection->server->loop, &connection->write_watcher);
-  ev_timer_stop(connection->server->loop, &connection->timeout_watcher);
+  ev_io_stop(connection->loop, &connection->read_watcher);
+  ev_io_stop(connection->loop, &connection->write_watcher);
+  ev_timer_stop(connection->loop, &connection->timeout_watcher);
 
   if(0 > close(connection->fd))
     error("problem closing connection fd");
@@ -287,7 +287,7 @@ on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
 #ifdef HAVE_GNUTLS
   assert(!ev_is_active(&connection->handshake_watcher));
 
-  if(connection->server->secure) {
+  if(connection->secure) {
     recved = gnutls_record_recv( connection->session
                                , recv_buffer
                                , recv_buffer_size
@@ -312,10 +312,16 @@ on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
 
   ebb_connection_reset_timeout(connection);
 
-  ebb_request_parser_execute(&connection->parser, recv_buffer, recved);
-
-  /* parse error? just drop the client. screw the 400 response */
-  if(ebb_request_parser_has_error(&connection->parser)) goto error;
+   if (!connection->parser) {
+     assert(connection->on_data && "Must be defined when no parser is used");
+     if (connection->on_data(connection, recv_buffer, recved)==EBB_STOP) {
+       ev_io_stop(connection->loop, &connection->read_watcher);
+     }
+   } else {
+     ebb_request_parser_execute(connection->parser, recv_buffer, recved);
+     /* parse error? just drop the client. screw the 400 response */
+     if(ebb_request_parser_has_error(connection->parser)) goto error;
+   }
 
   if(buf && buf->on_release)
     buf->on_release(buf);
@@ -336,6 +342,11 @@ on_writable(struct ev_loop *loop, ev_io *watcher, int revents)
   
   //printf("on_writable\n");
 
+  if (!connection->open) {
+     connection->open = 1;
+     goto connected;
+  }
+
   assert(CONNECTION_HAS_SOMETHING_TO_WRITE);
   assert(connection->written <= connection->to_write_len);
   // TODO -- why is this broken?
@@ -345,7 +356,7 @@ on_writable(struct ev_loop *loop, ev_io *watcher, int revents)
 #ifdef HAVE_GNUTLS
   assert(!ev_is_active(&connection->handshake_watcher));
 
-  if(connection->server->secure) {
+  if(connection->secure) {
     sent = gnutls_record_send( connection->session
                              , connection->to_write + connection->written
                              , connection->to_write_len - connection->written
@@ -375,12 +386,16 @@ on_writable(struct ev_loop *loop, ev_io *watcher, int revents)
 
   connection->written += sent;
 
+connected:;
   if(connection->written == connection->to_write_len) {
     ev_io_stop(loop, watcher);
-    connection->to_write = NULL;
 
     if(connection->after_write_cb)
       connection->after_write_cb(connection);
+ 
+   /* the callback might wish to release its buffer first */
+   connection->to_write = NULL;
+
   }
   return;
 error:
@@ -429,14 +444,24 @@ on_goodbye(struct ev_loop *loop, ev_timer *watcher, int revents)
   close_connection(connection);
 }
 
-
-static ebb_request* 
-new_request_wrapper(void *data)
+static void conn_setup(struct ev_loop *loop, ebb_connection *connection)
 {
-  ebb_connection *connection = data;
-  if(connection->new_request)
-    return connection->new_request(connection);
-  return NULL;
+
+  /* Note: not starting the write watcher until there is data to be written */
+  ev_io_set(&connection->write_watcher, connection->fd, EV_WRITE);
+  ev_io_set(&connection->read_watcher, connection->fd, EV_READ);
+  /* XXX: seperate error watcher? */
+
+  ev_timer_start(loop, &connection->timeout_watcher);
+
+#ifdef HAVE_GNUTLS
+  if(server->secure) {
+    ev_io_start(loop, &connection->handshake_watcher);
+    return;
+  }
+#endif
+  ev_io_start(loop, &connection->read_watcher);
+
 }
 
 /* Internal callback 
@@ -482,6 +507,8 @@ on_connection(struct ev_loop *loop, ev_io *watcher, int revents)
   set_nonblock(fd);
   connection->fd = fd;
   connection->open = TRUE;
+  connection->loop = server->loop;
+  connection->secure = server->secure;
   connection->server = server;
   memcpy(&connection->sockaddr, &addr, addr_len);
   if(server->port[0] != '\0')
@@ -511,21 +538,7 @@ on_connection(struct ev_loop *loop, ev_io *watcher, int revents)
   ev_io_set(&connection->handshake_watcher, connection->fd, EV_READ | EV_WRITE | EV_ERROR);
 #endif /* HAVE_GNUTLS */
 
-  /* Note: not starting the write watcher until there is data to be written */
-  ev_io_set(&connection->write_watcher, connection->fd, EV_WRITE);
-  ev_io_set(&connection->read_watcher, connection->fd, EV_READ | EV_ERROR);
-  /* XXX: seperate error watcher? */
-
-  ev_timer_start(loop, &connection->timeout_watcher);
-
-#ifdef HAVE_GNUTLS
-  if(server->secure) {
-    ev_io_start(loop, &connection->handshake_watcher);
-    return;
-  }
-#endif
-
-  ev_io_start(loop, &connection->read_watcher);
+  conn_setup(loop, connection);
 }
 
 /**
@@ -554,12 +567,65 @@ ebb_server_listen_on_fd(ebb_server *server, const int fd)
 }
 
 
+int	ebb_tcp_client(ebb_connection *c, const char *ip, const int port)
+{
+	struct linger ling = {0, 0};
+	struct sockaddr_in addr;
+	int fd, flags;
+
+	assert(c->loop);
+	assert(c->on_data);
+
+	fd = -1;
+	memset(&addr, 0, sizeof(addr));
+
+	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+		perror("socket()");
+		goto error;
+	}
+	set_nonblock(fd);
+
+	c->fd = fd;
+
+	flags = 1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (void *)&flags, sizeof(flags));
+	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags));
+	setsockopt(fd, SOL_SOCKET, SO_LINGER, (void *)&ling, sizeof(ling));
+	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (void *)&flags, sizeof(flags));
+
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = inet_addr(ip); 
+ 
+	if (c->sockaddr.sin_family == AF_INET && bind(fd, (struct sockaddr *)&c->sockaddr, sizeof(addr)) < 0) {
+		perror("bind()");
+		goto error;
+	}
+ 
+	conn_setup(c->loop, c);
+	if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+		if (errno == EINPROGRESS) {
+			/* waiting for connect to finish */
+			ev_io_start(c->loop, &c->write_watcher);
+			return 0;
+		}
+		perror("connect()");
+		goto error;
+	}
+	c->open = 1;
+
+	return 0;
+error:
+	ebb_connection_schedule_close (c);
+	return -1;
+}
+
 /**
  * Begin the server listening on a file descriptor This DOES NOT start the
  * event loop. Start the event loop after making this call.
  */
 int 
-ebb_server_listen_on_port(ebb_server *server, const int port)
+ebb_tcp_server(ebb_server *server, char *ip, const int port)
 {
   int fd = -1;
   struct linger ling = {0, 0};
@@ -588,7 +654,7 @@ ebb_server_listen_on_port(ebb_server *server, const int port)
   
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_addr.s_addr = (!ip)?htonl(INADDR_ANY):inet_addr(ip);
   
   if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     perror("bind()");
@@ -708,18 +774,11 @@ ebb_server_set_secure (ebb_server *server, const char *cert_file, const char *ke
 void 
 ebb_connection_init(ebb_connection *connection)
 {
+  memset(connection, 0, sizeof(*connection));
   connection->fd = -1;
-  connection->server = NULL;
-  connection->ip = NULL;
-  connection->open = FALSE;
-
-  ebb_request_parser_init( &connection->parser );
-  connection->parser.data = connection;
-  connection->parser.new_request = new_request_wrapper;
   
   ev_init (&connection->write_watcher, on_writable);
   connection->write_watcher.data = connection;
-  connection->to_write = NULL;
 
   ev_init(&connection->read_watcher, on_readable);
   connection->read_watcher.data = connection;
@@ -739,25 +798,27 @@ ebb_connection_init(ebb_connection *connection)
 
   ev_timer_init(&connection->timeout_watcher, on_timeout, EBB_DEFAULT_TIMEOUT, 0.);
   connection->timeout_watcher.data = connection;  
-
-  connection->new_buf = NULL;
-  connection->new_request = NULL;
-  connection->on_timeout = NULL;
-  connection->on_close = NULL;
-  connection->data = NULL;
 }
 
 void 
 ebb_connection_schedule_close (ebb_connection *connection)
 {
 #ifdef HAVE_GNUTLS
-  if(connection->server->secure) {
+  if(connection->secure) {
     ev_io_set(&connection->goodbye_tls_watcher, connection->fd, EV_ERROR | EV_READ | EV_WRITE);
-    ev_io_start(connection->server->loop, &connection->goodbye_tls_watcher);
+    ev_io_start(connection->loop, &connection->goodbye_tls_watcher);
     return;
   }
 #endif
-  ev_timer_start(connection->server->loop, &connection->goodbye_watcher);
+  ev_timer_start(connection->loop, &connection->goodbye_watcher);
+}
+
+void ebb_http_init(ebb_connection *connection)
+{
+  connection->parser = malloc(sizeof(*connection->parser));
+  memset(connection->parser, 0, sizeof(*connection->parser));
+  ebb_request_parser_init( connection->parser );
+  connection->parser->data = connection;
 }
 
 /* 
@@ -766,7 +827,7 @@ ebb_connection_schedule_close (ebb_connection *connection)
 void 
 ebb_connection_reset_timeout(ebb_connection *connection)
 {
-  ev_timer_again(connection->server->loop, &connection->timeout_watcher);
+  ev_timer_again(connection->loop, &connection->timeout_watcher);
 }
 
 /**
@@ -789,6 +850,17 @@ ebb_connection_write (ebb_connection *connection, const char *buf, size_t len, e
   connection->to_write_len = len;
   connection->written = 0;
   connection->after_write_cb = cb;
-  ev_io_start(connection->server->loop, &connection->write_watcher);
+  ev_io_start(connection->loop, &connection->write_watcher);
+  return TRUE;
+}
+
+/*
+ * re-request read events for connection (->on_data and no parser)
+ */
+int
+ebb_connection_read (ebb_connection *connection)
+{
+  assert(connection->on_data && !connection->parser);
+  ev_io_start(connection->loop, &connection->read_watcher);
   return TRUE;
 }

@@ -134,5 +134,6 @@ void ebb_connection_init (ebb_connection *connection);
 void ebb_connection_schedule_close (ebb_connection *);
 void ebb_connection_reset_timeout (ebb_connection *connection);
 int ebb_connection_write (ebb_connection *connection, const char *buf, size_t len, ebb_after_write_cb);
+int ebb_connection_read (ebb_connection *connection);
 
 #endif

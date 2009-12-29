@@ -49,8 +49,9 @@ static void request_complete(ebb_request *request)
   free(request);
 }
 
-static ebb_request* new_request(ebb_connection *connection)
+static ebb_request* new_request(void *d)
 {
+  ebb_connection *connection = d;
   //printf("request %d\n", ++c);
   ebb_request *request = malloc(sizeof(ebb_request));
   ebb_request_init(request);
@@ -73,8 +74,9 @@ ebb_connection* new_connection(ebb_server *server, struct sockaddr_in *addr)
   }
 
   ebb_connection_init(connection);
+  ebb_http_init(connection);
   connection->data = connection_data;
-  connection->new_request = new_request;
+  connection->parser->new_request = new_request;
   connection->on_close = on_close;
   
   //printf("connection: %d\n", c++);
@@ -91,7 +93,7 @@ int main()
   server.new_connection = new_connection;
 
   printf("hello_world listening on port 5000\n");
-  ebb_server_listen_on_port(&server, 5000);
+  ebb_tcp_server(&server, NULL, 5000);
   ev_loop(loop, 0);
 
   return 0;

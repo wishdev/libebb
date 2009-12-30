@@ -83,13 +83,14 @@ ebb_connection *new_connection(ebb_server *server, struct sockaddr_in *addr)
 int	main(int argc, char *argv[])
 {
 	struct ev_loop *loop = ev_default_loop(0);
-	ebb_server server;
+	static ebb_server server;
 
 	assert(argc == 4 && "Expected 3 arguments: listenport fwdhost fwdport");
 
 	ebb_server_init(&server, loop);
 	server.new_connection = new_connection;
 	server.data = argv+2;
+	ebb_server_set_secure(&server, "ca-cert.pem", "ca-key.pem");
 	ebb_tcp_server(&server, NULL, atol(argv[1]));
 
 	ev_loop(loop, 0);

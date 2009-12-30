@@ -1,5 +1,5 @@
 #based on the makefiles in rubinius 
-
+DEV=1
 # Set this such that $(LIBEVDIR)/lib include libev.so and 
 # $(LIBEVDIR)/include has ev.h
 LIBEVDIR=$(HOME)/local/libev
@@ -94,9 +94,11 @@ SOURCES=ebb.c ebb_request_parser.c rbtree.c
 OBJS=$(SOURCES:.c=.o)
 
 %.o: %.c
+	echo $(COMP) $(CFLAGS) $(OPTIMIZATIONS) -c $< -o $@
 	$(COMP) $(CFLAGS) $(OPTIMIZATIONS) -c $< -o $@
 
 %.o: %.S
+	echo $(COMP) $(CFLAGS) $(OPTIMIZATIONS) -c $< -o $@
 	$(COMP) $(CFLAGS) $(OPTIMIZATIONS) -c $< -o $@
 
 .%.d:  %.c  $(DEPS)

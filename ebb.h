@@ -92,7 +92,7 @@ struct ebb_connection {
 
   /* Public */
 
-  ebb_request* (*new_request) (ebb_connection*); 
+//  ebb_request* (*new_request) (ebb_connection*); 
 
   /* The new_buf callback allocates and initializes an ebb_buf structure.
    * By default this is set to a simple malloc() based callback which always

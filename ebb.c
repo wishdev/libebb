@@ -296,7 +296,7 @@ on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
       if(gnutls_error_is_fatal(recved)) goto error;
       if( (recved == GNUTLS_E_INTERRUPTED || recved == GNUTLS_E_AGAIN)
        && GNUTLS_NEED_WRITE
-        ) ev_io_start(loop, &connection->write_watcher);
+        ) ev_io_start(loop, &connection->write_watcher); else goto error;
       return; 
     } 
   } else {
@@ -304,7 +304,7 @@ on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
 
     recved = recv(connection->fd, recv_buffer, recv_buffer_size, 0);
     if(recved < 0) goto error;
-    if(recved == 0) return;
+    if(recved == 0) goto error;
 
 #ifdef HAVE_GNUTLS
   }
@@ -376,7 +376,7 @@ on_writable(struct ev_loop *loop, ev_io *watcher, int revents)
                          , connection->to_write_len - connection->written
                          );
     if(sent < 0) goto error;
-    if(sent == 0) return;
+    if(sent == 0) goto error;
 
 #ifdef HAVE_GNUTLS
   }
@@ -535,7 +535,7 @@ on_connection(struct ev_loop *loop, ev_io *watcher, int revents)
     gnutls_db_set_remove_function (connection->session, session_cache_remove);
   }
 
-  ev_io_set(&connection->handshake_watcher, connection->fd, EV_READ | EV_WRITE);
+  ev_io_set(&connection->handshake_watcher, connection->fd, EV_READ);
 #endif /* HAVE_GNUTLS */
 
   conn_setup(loop, connection);
@@ -805,7 +805,7 @@ ebb_connection_schedule_close (ebb_connection *connection)
 {
 #ifdef HAVE_GNUTLS
   if(connection->secure) {
-    ev_io_set(&connection->goodbye_tls_watcher, connection->fd, EV_READ | EV_WRITE);
+    ev_io_set(&connection->goodbye_tls_watcher, connection->fd, EV_READ|EV_WRITE);
     ev_io_start(connection->loop, &connection->goodbye_tls_watcher);
     return;
   }

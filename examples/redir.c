@@ -28,6 +28,12 @@ int	on_data(ebb_connection *c, char *buf, int count)
 {
 	char *wbuf;
 
+	/* the other peer died, kill us too */
+	if (!c->data) {
+		ebb_connection_schedule_close(c);
+		return EBB_STOP;
+	}
+
 	wbuf = malloc(count);
 	memcpy(wbuf, buf, count);
 	assert(ebb_connection_write(c->data, wbuf, count, write_done));
